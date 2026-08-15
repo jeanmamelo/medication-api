@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: medications
+      POSTGRES_USER: medications
+      POSTGRES_PASSWORD: medications
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./migrations/000001_create_medications.up.sql:/docker-entrypoint-initdb.d/000001_create_medications.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medications -d medications"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      APP_ENV: dev
+      DATABASE_URL: postgres://medications:medications@db:5432/medications?sslmode=disable
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
