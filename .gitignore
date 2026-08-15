@@ -1,6 +1,7 @@
 # Local tooling and temporary artifacts
 tmp/
 coverage.out
+*:Zone.Identifier
 
 # Local configuration
 .env
