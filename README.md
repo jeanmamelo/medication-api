@@ -5,21 +5,10 @@ REST API for medication records, built with Go and PostgreSQL.
 ## Requirements
 
 - Go 1.26+
+- Postgres 18
+- Docker
 
-## Run locally
-
-```bash
-go run ./cmd/api
-```
-
-The server listens on `http://localhost:8080` by default.
-
-```bash
-curl http://localhost:8080/healthz
-curl http://localhost:8080/readyz
-```
-
-## Run with Docker
+## Run locally with Docker
 
 ```bash
 docker compose up --build
@@ -27,44 +16,51 @@ docker compose up --build
 
 The Compose database applies the initial migration when its volume is created.
 
-## API
+Check process health and database readiness:
 
-With the API running, set a base URL:
 
 ```bash
-API_URL=http://localhost:8080
+curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
 ```
+
+## API usage
 
 Create a medication (`201 Created`):
 
 ```bash
-curl -X POST "$API_URL/v1/medications" \
+curl -X POST "http://localhost:8080/v1/medications" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Paracetamol","dosage":"500 mg","form":"tablet"}'
 ```
 
-The response includes the generated `id`. Use it in the examples below:
+The response includes the generated `id`. Use it as in the examples below:
 
-```bash
-MEDICATION_ID='<id returned by POST>'
+```json
+{
+	"id": "58072a4d-bed8-4eb8-b68b-337710483fc6",
+	"name": "Paracetamol",
+	"dosage": "500 mg",
+	"form": "tablet"
+}
 ```
 
 List medications with pagination (`200 OK`; `limit` accepts 1–100 and `offset` is non-negative):
 
 ```bash
-curl "$API_URL/v1/medications?limit=20&offset=0"
+curl "http://localhost:8080/v1/medications?limit=20&offset=0"
 ```
 
 Retrieve one medication (`200 OK`):
 
 ```bash
-curl "$API_URL/v1/medications/$MEDICATION_ID"
+curl "http://localhost:8080/v1/medications/58072a4d-bed8-4eb8-b68b-337710483fc6"
 ```
 
 Update one or more fields (`200 OK`):
 
 ```bash
-curl -X PATCH "$API_URL/v1/medications/$MEDICATION_ID" \
+curl -X PATCH "http://localhost:8080/v1/medications/58072a4d-bed8-4eb8-b68b-337710483fc6" \
   -H 'Content-Type: application/json' \
   -d '{"dosage":"750 mg"}'
 ```
@@ -72,20 +68,13 @@ curl -X PATCH "$API_URL/v1/medications/$MEDICATION_ID" \
 Delete a medication (`204 No Content`):
 
 ```bash
-curl -i -X DELETE "$API_URL/v1/medications/$MEDICATION_ID"
-```
-
-Check process health and database readiness:
-
-```bash
-curl "$API_URL/healthz"
-curl "$API_URL/readyz"
+curl -i -X DELETE "http://localhost:8080/v1/medications/58072a4d-bed8-4eb8-b68b-337710483fc6"
 ```
 
 Inspect in-process HTTP counters in Prometheus text format:
 
 ```bash
-curl "$API_URL/metrics"
+curl "http://localhost:8080/metrics"
 ```
 
 For request and response details, see [`docs/api-contract.md`](docs/api-contract.md).
