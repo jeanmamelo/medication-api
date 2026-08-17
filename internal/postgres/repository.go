@@ -7,12 +7,20 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jeanmamelo/medication-api/internal/medication"
 )
 
 type Repository struct {
-	pool *pgxpool.Pool
+	pool pool
+}
+
+type pool interface {
+	Ping(context.Context) error
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
 func NewRepository(pool *pgxpool.Pool) *Repository {

@@ -36,7 +36,7 @@ func main() {
 	service := medication.NewService(repository, medication.RandomUUIDGenerator{})
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,
-		Handler:           httpapi.NewRouter(repository, service),
+		Handler:           httpapi.NewRouterWithLogger(repository, service, logger),
 		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTP.ReadTimeout,
 		WriteTimeout:      cfg.HTTP.WriteTimeout,

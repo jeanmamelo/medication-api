@@ -5,10 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jeanmamelo/medication-api/internal/medication"
 )
@@ -38,9 +44,19 @@ type MedicationService interface {
 }
 
 func NewRouter(readiness Readiness, medications MedicationService) http.Handler {
+	return NewRouterWithLogger(readiness, medications, slog.Default())
+}
+
+// NewRouterWithLogger composes the public HTTP surface with request logging and metrics.
+func NewRouterWithLogger(readiness Readiness, medications MedicationService, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	metrics := NewMetrics()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("GET /readyz", readinessHandler(readiness))
+	mux.Handle("GET /metrics", metrics)
 	if medications != nil {
 		mux.HandleFunc("POST /v1/medications", createMedicationHandler(medications))
 		mux.HandleFunc("GET /v1/medications", listMedicationsHandler(medications))
@@ -49,7 +65,84 @@ func NewRouter(readiness Readiness, medications MedicationService) http.Handler 
 		mux.HandleFunc("DELETE /v1/medications/{id}", deleteMedicationHandler(medications))
 	}
 
-	return securityHeaders(mux)
+	return requestObservability(logger, metrics, securityHeaders(mux))
+}
+
+// Metrics contains in-process HTTP counters suitable for scraping by a local collector.
+type Metrics struct {
+	requests atomic.Uint64
+	mu       sync.RWMutex
+	statuses map[int]uint64
+}
+
+func NewMetrics() *Metrics {
+	return &Metrics{statuses: make(map[int]uint64)}
+}
+
+func (metrics *Metrics) observe(status int) {
+	metrics.requests.Add(1)
+	metrics.mu.Lock()
+	metrics.statuses[status]++
+	metrics.mu.Unlock()
+}
+
+func (metrics *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
+	metrics.mu.RLock()
+	statuses := make(map[int]uint64, len(metrics.statuses))
+	for status, count := range metrics.statuses {
+		statuses[status] = count
+	}
+	metrics.mu.RUnlock()
+
+	keys := make([]int, 0, len(statuses))
+	for status := range statuses {
+		keys = append(keys, status)
+	}
+	sort.Ints(keys)
+
+	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = fmt.Fprintf(writer, "# HELP medication_http_requests_total Total HTTP requests.\n# TYPE medication_http_requests_total counter\nmedication_http_requests_total %d\n", metrics.requests.Load())
+	for _, status := range keys {
+		_, _ = fmt.Fprintf(writer, "medication_http_responses_total{status=\"%d\"} %d\n", status, statuses[status])
+	}
+}
+
+type observabilityWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (writer *observabilityWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *observabilityWriter) WriteHeader(status int) {
+	if writer.status != 0 {
+		return
+	}
+	writer.status = status
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *observabilityWriter) Write(bytes []byte) (int, error) {
+	if writer.status == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.ResponseWriter.Write(bytes)
+}
+
+func requestObservability(logger *slog.Logger, metrics *Metrics, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		observed := &observabilityWriter{ResponseWriter: writer}
+		next.ServeHTTP(observed, request)
+		status := observed.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		metrics.observe(status)
+		logger.Info("http request", "method", request.Method, "route", request.Pattern, "status", status, "duration", time.Since(started))
+	})
 }
 
 type medicationRequest struct {
