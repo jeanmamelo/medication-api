@@ -82,6 +82,12 @@ curl "$API_URL/healthz"
 curl "$API_URL/readyz"
 ```
 
+Inspect in-process HTTP counters in Prometheus text format:
+
+```bash
+curl "$API_URL/metrics"
+```
+
 For request and response details, see [`docs/api-contract.md`](docs/api-contract.md).
 
 ## Test
@@ -102,5 +108,6 @@ go test ./...
 
 - `GET /healthz`: process liveness check.
 - `GET /readyz`: dependency readiness check.
+- `GET /metrics`: HTTP request and response counters for local scraping.
 
 The API uses `/v1` versioning. Collection endpoints use `limit` and `offset` pagination. The server performs graceful shutdown and keeps its security timeouts as internal defaults.

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jeanmamelo/medication-api/internal/medication"
@@ -70,6 +72,117 @@ func TestMedicationEndpoints(t *testing.T) {
 	}
 }
 
+func TestMedicationReadUpdateDeleteEndpoints(t *testing.T) {
+	item := medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}
+	service := &medicationServiceStub{item: item}
+	router := NewRouter(AlwaysReady{}, service)
+
+	response := perform(router, http.MethodGet, "/v1/medications/id", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"id"`) {
+		t.Fatalf("GET status/body = %d/%q", response.Code, response.Body.String())
+	}
+
+	response = perform(router, http.MethodPatch, "/v1/medications/id", `{"dosage":"750 mg"}`)
+	if response.Code != http.StatusOK || service.updateID != "id" || service.updateInput.Dosage == nil || *service.updateInput.Dosage != "750 mg" {
+		t.Fatalf("PATCH status/input = %d/%#v", response.Code, service.updateInput)
+	}
+
+	response = perform(router, http.MethodDelete, "/v1/medications/id", "")
+	if response.Code != http.StatusNoContent || service.deleteID != "id" {
+		t.Fatalf("DELETE status/id = %d/%q", response.Code, service.deleteID)
+	}
+}
+
+func TestMedicationEndpointsMapServiceErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		setErr func(*medicationServiceStub)
+		want   int
+	}{
+		{name: "get not found", method: http.MethodGet, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.getErr = medication.ErrNotFound }, want: http.StatusNotFound},
+		{name: "get internal", method: http.MethodGet, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.getErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+		{name: "create validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("name is required") }, want: http.StatusBadRequest},
+		{name: "create internal", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+		{name: "list invalid pagination", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = medication.ErrInvalidPagination }, want: http.StatusBadRequest},
+		{name: "list internal", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+		{name: "update not found", method: http.MethodPatch, path: "/v1/medications/id", body: `{"name":"x"}`, setErr: func(s *medicationServiceStub) { s.updateErr = medication.ErrNotFound }, want: http.StatusNotFound},
+		{name: "update internal", method: http.MethodPatch, path: "/v1/medications/id", body: `{"name":"x"}`, setErr: func(s *medicationServiceStub) { s.updateErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+		{name: "delete not found", method: http.MethodDelete, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.deleteErr = medication.ErrNotFound }, want: http.StatusNotFound},
+		{name: "delete internal", method: http.MethodDelete, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.deleteErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &medicationServiceStub{item: medication.Medication{ID: "id"}}
+			test.setErr(service)
+			response := perform(NewRouter(AlwaysReady{}, service), test.method, test.path, test.body)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d; body = %q", response.Code, test.want, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMedicationRequestValidationAndPagination(t *testing.T) {
+	service := &medicationServiceStub{item: medication.Medication{ID: "id"}}
+	router := NewRouter(AlwaysReady{}, service)
+	for _, test := range []struct {
+		name, method, path, body string
+	}{
+		{name: "malformed json", method: http.MethodPost, path: "/v1/medications", body: "{"},
+		{name: "unknown field", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z","extra":true}`},
+		{name: "multiple objects", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}{}`},
+		{name: "empty patch", method: http.MethodPatch, path: "/v1/medications/id", body: `{}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := perform(router, test.method, test.path, test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", response.Code)
+			}
+		})
+	}
+	for _, query := range []string{"?limit=0", "?limit=101", "?limit=-1", "?offset=-1", "?limit=nope", "?offset=nope"} {
+		response := perform(router, http.MethodGet, "/v1/medications"+query, "")
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("query %s status = %d, want 400", query, response.Code)
+		}
+	}
+	if service.createCalls != 0 || service.updateCalls != 0 || service.listCalls != 0 {
+		t.Errorf("invalid requests reached service: create=%d update=%d list=%d", service.createCalls, service.updateCalls, service.listCalls)
+	}
+}
+
+func TestMetricsAndRequestLogs(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	service := &medicationServiceStub{item: medication.Medication{ID: "secret-id"}}
+	router := NewRouterWithLogger(AlwaysReady{}, service, logger)
+
+	perform(router, http.MethodGet, "/v1/medications/secret-id", "")
+	metrics := perform(router, http.MethodGet, "/metrics", "")
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "medication_http_requests_total 1") || !strings.Contains(metrics.Body.String(), `status="200"`) {
+		t.Fatalf("metrics = %d %q", metrics.Code, metrics.Body.String())
+	}
+	if got := metrics.Header().Get("Content-Type"); got != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Errorf("metrics content type = %q", got)
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, `route="GET /v1/medications/{id}"`) || !strings.Contains(logOutput, "status=200") {
+		t.Errorf("log does not contain route/status: %q", logOutput)
+	}
+	if strings.Contains(logOutput, "secret-id") {
+		t.Errorf("log exposed medication ID: %q", logOutput)
+	}
+}
+
+func perform(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(method, path, bytes.NewBufferString(body)))
+	return response
+}
+
 func assertSecurityHeaders(t *testing.T, response *httptest.ResponseRecorder) {
 	t.Helper()
 
@@ -92,18 +205,31 @@ func (function readinessFunc) Ready(ctx context.Context) error {
 	return function(ctx)
 }
 
-type medicationServiceStub struct{ item medication.Medication }
+type medicationServiceStub struct {
+	item                                             medication.Medication
+	createErr, getErr, listErr, updateErr, deleteErr error
+	createCalls, listCalls, updateCalls              int
+	updateID, deleteID                               string
+	updateInput                                      medication.UpdateInput
+}
 
 func (stub *medicationServiceStub) Create(_ context.Context, _ medication.CreateInput) (medication.Medication, error) {
-	return stub.item, nil
+	stub.createCalls++
+	return stub.item, stub.createErr
 }
 func (stub *medicationServiceStub) Get(_ context.Context, _ string) (medication.Medication, error) {
-	return stub.item, nil
+	return stub.item, stub.getErr
 }
 func (stub *medicationServiceStub) List(_ context.Context, _, _ int) ([]medication.Medication, error) {
-	return []medication.Medication{stub.item}, nil
+	stub.listCalls++
+	return []medication.Medication{stub.item}, stub.listErr
 }
-func (stub *medicationServiceStub) Update(_ context.Context, _ string, _ medication.UpdateInput) (medication.Medication, error) {
-	return stub.item, nil
+func (stub *medicationServiceStub) Update(_ context.Context, id string, input medication.UpdateInput) (medication.Medication, error) {
+	stub.updateCalls++
+	stub.updateID, stub.updateInput = id, input
+	return stub.item, stub.updateErr
 }
-func (stub *medicationServiceStub) Delete(_ context.Context, _ string) error { return nil }
+func (stub *medicationServiceStub) Delete(_ context.Context, id string) error {
+	stub.deleteID = id
+	return stub.deleteErr
+}
