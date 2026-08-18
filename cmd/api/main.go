@@ -86,7 +86,7 @@ func newPool(cfg config.Config) (*pgxpool.Pool, error) {
 
 func newLogger(environment string) *slog.Logger {
 	options := &slog.HandlerOptions{Level: slog.LevelInfo}
-	if environment == "dev" {
+	if environment == "local" {
 		return slog.New(slog.NewTextHandler(os.Stdout, options))
 	}
 

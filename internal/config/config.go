@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultEnvironment     = "dev"
+	defaultEnvironment     = "local"
 	defaultPort            = 8080
 	defaultReadHeaderLimit = 5 * time.Second
 	defaultReadLimit       = 15 * time.Second
@@ -72,8 +72,8 @@ func Load() (Config, error) {
 	}
 
 	environment := valueOrDefault("APP_ENV", defaultEnvironment)
-	if environment != "dev" && environment != "hom" && environment != "prod" {
-		return Config{}, fmt.Errorf("APP_ENV must be dev, hom, or prod")
+	if environment != "local" && environment != "prod" {
+		return Config{}, fmt.Errorf("APP_ENV must be local or prod")
 	}
 
 	maxConns, err := poolSizeFromEnv("DB_MAX_CONNS", defaultMaxConns)

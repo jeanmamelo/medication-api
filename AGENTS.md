@@ -59,7 +59,7 @@ Standard Go layout, dependency direction flows inward toward `internal/medicatio
   and `Readiness` are interfaces defined here and satisfied by `medication.Service` and
   `postgres.Repository`, keeping this package decoupled from concrete implementations.
 - `internal/config` — reads and validates env vars once at startup (`Load()`), fails
-  fast on invalid config. `APP_ENV` controls log format: `dev` → text logs, `hom`/`prod`
+  fast on invalid config. `APP_ENV` controls log format: `local` → text logs, `prod`
   → JSON logs.
 - `migrations/` — plain numbered SQL files (`NNNNNN_description.{up,down}.sql`),
   embedded into the `migrate` binary via `migrations/embed.go` (`//go:embed *.sql`). New

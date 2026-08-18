@@ -27,7 +27,7 @@ services:
   api:
     build: .
     environment:
-      APP_ENV: dev
+      APP_ENV: local
       DATABASE_URL: postgres://medications:medications@db:5432/medications?sslmode=disable
     ports:
       - "8080:8080"

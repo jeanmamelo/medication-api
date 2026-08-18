@@ -122,7 +122,7 @@ go test ./...
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `APP_ENV` | `dev` | `dev`, `hom`, or `prod`. `dev` emits text logs; the others emit JSON logs. |
+| `APP_ENV` | `local` | `local` or `prod`. `local` emits text logs; `prod` emits JSON logs. |
 | `PORT` | `8080` | HTTP listening port. |
 | `DATABASE_URL` | — | PostgreSQL connection URL. Any `pool_*` parameter is overridden by the settings below. |
 | `DB_MAX_CONNS` | `10` | Maximum pooled database connections. |
