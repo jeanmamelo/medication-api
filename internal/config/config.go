@@ -19,6 +19,12 @@ const (
 	defaultWriteLimit      = 15 * time.Second
 	defaultIdleLimit       = 60 * time.Second
 	defaultShutdownLimit   = 10 * time.Second
+
+	defaultMaxConns          = 10
+	defaultMinConns          = 2
+	defaultConnLifetime      = time.Hour
+	defaultConnIdleTime      = 30 * time.Minute
+	defaultHealthCheckPeriod = time.Minute
 )
 
 // Config contains only process-level settings. Secrets are never logged.
@@ -26,6 +32,17 @@ type Config struct {
 	Environment string
 	DatabaseURL string
 	HTTP        HTTPConfig
+	Database    DatabaseConfig
+}
+
+// DatabaseConfig bounds the connection pool. These values are authoritative, so any
+// pool_* parameter in DATABASE_URL is overridden.
+type DatabaseConfig struct {
+	MaxConns          int32
+	MinConns          int32
+	MaxConnLifetime   time.Duration
+	MaxConnIdleTime   time.Duration
+	HealthCheckPeriod time.Duration
 }
 
 // HTTPConfig controls the network-facing server limits.
@@ -58,6 +75,18 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("APP_ENV must be dev, hom, or prod")
 	}
 
+	maxConns, err := positiveIntFromEnv("DB_MAX_CONNS", defaultMaxConns)
+	if err != nil {
+		return Config{}, err
+	}
+	minConns, err := positiveIntFromEnv("DB_MIN_CONNS", defaultMinConns)
+	if err != nil {
+		return Config{}, err
+	}
+	if minConns > maxConns {
+		return Config{}, fmt.Errorf("DB_MIN_CONNS must not exceed DB_MAX_CONNS")
+	}
+
 	return Config{
 		Environment: environment,
 		DatabaseURL: databaseURL,
@@ -68,6 +97,13 @@ func Load() (Config, error) {
 			WriteTimeout:      defaultWriteLimit,
 			IdleTimeout:       defaultIdleLimit,
 			ShutdownTimeout:   defaultShutdownLimit,
+		},
+		Database: DatabaseConfig{
+			MaxConns:          int32(maxConns),
+			MinConns:          int32(minConns),
+			MaxConnLifetime:   defaultConnLifetime,
+			MaxConnIdleTime:   defaultConnIdleTime,
+			HealthCheckPeriod: defaultHealthCheckPeriod,
 		},
 	}, nil
 }

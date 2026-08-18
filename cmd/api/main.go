@@ -17,6 +17,8 @@ import (
 	"github.com/jeanmamelo/medication-api/internal/postgres"
 )
 
+const poolPingTimeout = 5 * time.Second
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -25,7 +27,7 @@ func main() {
 	}
 
 	logger := newLogger(cfg.Environment)
-	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	pool, err := newPool(cfg)
 	if err != nil {
 		logger.Error("connect to database", "error", err)
 		os.Exit(1)
@@ -52,6 +54,34 @@ func main() {
 	}()
 
 	shutdownOnSignal(server, logger, cfg.HTTP.ShutdownTimeout)
+}
+
+// newPool applies the configured pool bounds and verifies connectivity so an
+// unreachable database fails startup instead of the first request.
+func newPool(cfg config.Config) (*pgxpool.Pool, error) {
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	poolConfig.MaxConns = cfg.Database.MaxConns
+	poolConfig.MinConns = cfg.Database.MinConns
+	poolConfig.MaxConnLifetime = cfg.Database.MaxConnLifetime
+	poolConfig.MaxConnIdleTime = cfg.Database.MaxConnIdleTime
+	poolConfig.HealthCheckPeriod = cfg.Database.HealthCheckPeriod
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), poolPingTimeout)
+	defer cancel()
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
+
+	return pool, nil
 }
 
 func newLogger(environment string) *slog.Logger {

@@ -14,7 +14,31 @@ REST API for medication records, built with Go and PostgreSQL.
 docker compose up --build
 ```
 
-The Compose database applies the initial migration when its volume is created.
+Compose runs the `migrate` service to completion before starting the API, so local
+development exercises the same migration runner used in production.
+
+If you previously ran a version of this stack that seeded the schema through
+`docker-entrypoint-initdb.d`, reset the volume once so the runner can record its
+migrations: `docker compose down -v`.
+
+## Database migrations
+
+The production image contains the migration runner at `/migrate`. On Render,
+configure the service's **Pre-Deploy Command** as:
+
+```bash
+/migrate
+```
+
+Set `DATABASE_URL` to the Render PostgreSQL connection string. The runner
+records applied versions in `schema_migrations` and uses a PostgreSQL advisory
+lock to prevent concurrent deploys from applying the same migration twice.
+
+To run migrations locally against a configured database:
+
+```bash
+DATABASE_URL='postgres://user:password@localhost:5432/medications' go run ./cmd/migrate
+```
 
 Check process health and database readiness:
 
@@ -91,7 +115,9 @@ go test ./...
 | --- | --- | --- |
 | `APP_ENV` | `dev` | `dev`, `hom`, or `prod`. `dev` emits text logs; the others emit JSON logs. |
 | `PORT` | `8080` | HTTP listening port. |
-| `DATABASE_URL` | — | PostgreSQL connection URL. |
+| `DATABASE_URL` | — | PostgreSQL connection URL. Any `pool_*` parameter is overridden by the settings below. |
+| `DB_MAX_CONNS` | `10` | Maximum pooled database connections. |
+| `DB_MIN_CONNS` | `2` | Connections kept warm; must not exceed `DB_MAX_CONNS`. |
 
 ## Health endpoints
 

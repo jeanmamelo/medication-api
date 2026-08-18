@@ -7,12 +7,22 @@ services:
       POSTGRES_PASSWORD: medications
     volumes:
       - postgres_data:/var/lib/postgresql
-      - ./migrations/000001_create_medications.up.sql:/docker-entrypoint-initdb.d/000001_create_medications.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U medications -d medications"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Runs the same binary as the production Pre-Deploy Command, so local development
+  # exercises the real migration path instead of docker-entrypoint-initdb.d.
+  migrate:
+    build: .
+    entrypoint: ["/migrate"]
+    environment:
+      DATABASE_URL: postgres://medications:medications@db:5432/medications?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
 
   api:
     build: .
@@ -24,6 +34,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:
