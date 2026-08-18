@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jeanmamelo/medication-api/docs"
+	"github.com/jeanmamelo/medication-api/internal/httpapi/swaggerui"
 	"github.com/jeanmamelo/medication-api/internal/medication"
 )
 
@@ -57,54 +59,93 @@ func NewRouterWithLogger(readiness Readiness, medications MedicationService, log
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("GET /readyz", readinessHandler(readiness))
 	mux.Handle("GET /metrics", metrics)
+	mux.HandleFunc("GET /openapi.yaml", openAPIHandler)
+	mux.Handle("GET /docs/", http.StripPrefix("/docs/", http.FileServerFS(swaggerui.FS)))
 	if medications != nil {
-		mux.HandleFunc("POST /v1/medications", createMedicationHandler(medications))
-		mux.HandleFunc("GET /v1/medications", listMedicationsHandler(medications))
-		mux.HandleFunc("GET /v1/medications/{id}", getMedicationHandler(medications))
-		mux.HandleFunc("PATCH /v1/medications/{id}", updateMedicationHandler(medications))
-		mux.HandleFunc("DELETE /v1/medications/{id}", deleteMedicationHandler(medications))
+		mux.HandleFunc("POST /v1/medications", createMedicationHandler(medications, logger))
+		mux.HandleFunc("GET /v1/medications", listMedicationsHandler(medications, logger))
+		mux.HandleFunc("GET /v1/medications/{id}", getMedicationHandler(medications, logger))
+		mux.HandleFunc("PATCH /v1/medications/{id}", updateMedicationHandler(medications, logger))
+		mux.HandleFunc("DELETE /v1/medications/{id}", deleteMedicationHandler(medications, logger))
 	}
 
-	return requestObservability(logger, metrics, securityHeaders(mux))
+	return withRequestID(requestObservability(logger, metrics, securityHeaders(mux)))
+}
+
+// responseKey bounds metric cardinality: the route is the ServeMux pattern rather than
+// the raw path, and unrecognized methods collapse into a single series.
+type responseKey struct {
+	method string
+	route  string
+	status int
 }
 
 // Metrics contains in-process HTTP counters suitable for scraping by a local collector.
 type Metrics struct {
-	requests atomic.Uint64
-	mu       sync.RWMutex
-	statuses map[int]uint64
+	requests  atomic.Uint64
+	mu        sync.RWMutex
+	responses map[responseKey]uint64
 }
 
 func NewMetrics() *Metrics {
-	return &Metrics{statuses: make(map[int]uint64)}
+	return &Metrics{responses: make(map[responseKey]uint64)}
 }
 
-func (metrics *Metrics) observe(status int) {
+func (metrics *Metrics) observe(key responseKey) {
 	metrics.requests.Add(1)
 	metrics.mu.Lock()
-	metrics.statuses[status]++
+	metrics.responses[key]++
 	metrics.mu.Unlock()
 }
 
 func (metrics *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	metrics.mu.RLock()
-	statuses := make(map[int]uint64, len(metrics.statuses))
-	for status, count := range metrics.statuses {
-		statuses[status] = count
+	responses := make(map[responseKey]uint64, len(metrics.responses))
+	for key, count := range metrics.responses {
+		responses[key] = count
 	}
 	metrics.mu.RUnlock()
 
-	keys := make([]int, 0, len(statuses))
-	for status := range statuses {
-		keys = append(keys, status)
+	keys := make([]responseKey, 0, len(responses))
+	for key := range responses {
+		keys = append(keys, key)
 	}
-	sort.Ints(keys)
+	sort.Slice(keys, func(left, right int) bool {
+		if keys[left].method != keys[right].method {
+			return keys[left].method < keys[right].method
+		}
+		if keys[left].route != keys[right].route {
+			return keys[left].route < keys[right].route
+		}
+		return keys[left].status < keys[right].status
+	})
 
 	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = fmt.Fprintf(writer, "# HELP medication_http_requests_total Total HTTP requests.\n# TYPE medication_http_requests_total counter\nmedication_http_requests_total %d\n", metrics.requests.Load())
-	for _, status := range keys {
-		_, _ = fmt.Fprintf(writer, "medication_http_responses_total{status=\"%d\"} %d\n", status, statuses[status])
+	for _, key := range keys {
+		_, _ = fmt.Fprintf(writer, "medication_http_responses_total{method=\"%s\",route=\"%s\",status=\"%d\"} %d\n", escapeLabel(key.method), escapeLabel(key.route), key.status, responses[key])
 	}
+}
+
+var knownMethods = map[string]bool{
+	http.MethodGet: true, http.MethodPost: true, http.MethodPut: true,
+	http.MethodPatch: true, http.MethodDelete: true, http.MethodHead: true,
+	http.MethodOptions: true,
+}
+
+func responseLabels(request *http.Request, status int) responseKey {
+	method, route := request.Method, request.Pattern
+	if !knownMethods[method] {
+		method = "other"
+	}
+	if route == "" {
+		route = "unmatched"
+	}
+	return responseKey{method: method, route: route, status: status}
+}
+
+func escapeLabel(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(value)
 }
 
 type observabilityWriter struct {
@@ -140,8 +181,8 @@ func requestObservability(logger *slog.Logger, metrics *Metrics, next http.Handl
 		if status == 0 {
 			status = http.StatusOK
 		}
-		metrics.observe(status)
-		logger.Info("http request", "method", request.Method, "route", request.Pattern, "status", status, "duration", time.Since(started))
+		metrics.observe(responseLabels(request, status))
+		logger.Info("http request", "method", request.Method, "route", request.Pattern, "status", status, "duration", time.Since(started), "request_id", RequestIDFromContext(request.Context()))
 	})
 }
 
@@ -151,7 +192,7 @@ type medicationRequest struct {
 	Form   *string `json:"form"`
 }
 
-func createMedicationHandler(service MedicationService) http.HandlerFunc {
+func createMedicationHandler(service MedicationService, logger *slog.Logger) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		input, ok := decodeMedicationRequest(writer, request)
 		if !ok || input.Name == nil || input.Dosage == nil || input.Form == nil {
@@ -162,7 +203,7 @@ func createMedicationHandler(service MedicationService) http.HandlerFunc {
 		}
 		item, err := service.Create(request.Context(), medication.CreateInput{Name: *input.Name, Dosage: *input.Dosage, Form: *input.Form})
 		if err != nil {
-			writeServiceError(writer, err)
+			writeServiceError(writer, request, logger, err)
 			return
 		}
 		writer.Header().Set("Location", "/v1/medications/"+item.ID)
@@ -170,7 +211,7 @@ func createMedicationHandler(service MedicationService) http.HandlerFunc {
 	}
 }
 
-func listMedicationsHandler(service MedicationService) http.HandlerFunc {
+func listMedicationsHandler(service MedicationService, logger *slog.Logger) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		limit, offset, ok := pagination(writer, request)
 		if !ok {
@@ -178,25 +219,25 @@ func listMedicationsHandler(service MedicationService) http.HandlerFunc {
 		}
 		items, err := service.List(request.Context(), limit, offset)
 		if err != nil {
-			writeServiceError(writer, err)
+			writeServiceError(writer, request, logger, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
 	}
 }
 
-func getMedicationHandler(service MedicationService) http.HandlerFunc {
+func getMedicationHandler(service MedicationService, logger *slog.Logger) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		item, err := service.Get(request.Context(), request.PathValue("id"))
 		if err != nil {
-			writeServiceError(writer, err)
+			writeServiceError(writer, request, logger, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, item)
 	}
 }
 
-func updateMedicationHandler(service MedicationService) http.HandlerFunc {
+func updateMedicationHandler(service MedicationService, logger *slog.Logger) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		input, ok := decodeMedicationRequest(writer, request)
 		if !ok {
@@ -208,17 +249,17 @@ func updateMedicationHandler(service MedicationService) http.HandlerFunc {
 		}
 		item, err := service.Update(request.Context(), request.PathValue("id"), medication.UpdateInput{Name: input.Name, Dosage: input.Dosage, Form: input.Form})
 		if err != nil {
-			writeServiceError(writer, err)
+			writeServiceError(writer, request, logger, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, item)
 	}
 }
 
-func deleteMedicationHandler(service MedicationService) http.HandlerFunc {
+func deleteMedicationHandler(service MedicationService, logger *slog.Logger) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if err := service.Delete(request.Context(), request.PathValue("id")); err != nil {
-			writeServiceError(writer, err)
+		if err := service.Delete(request.Context(), request.PathValue("id")); err != nil && !errors.Is(err, medication.ErrNotFound) {
+			writeServiceError(writer, request, logger, err)
 			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
@@ -242,7 +283,7 @@ func decodeMedicationRequest(writer http.ResponseWriter, request *http.Request) 
 }
 
 func pagination(writer http.ResponseWriter, request *http.Request) (int, int, bool) {
-	limit, offset := 20, 0
+	limit, offset := medication.DefaultPageSize, 0
 	var err error
 	if value := request.URL.Query().Get("limit"); value != "" {
 		limit, err = strconv.Atoi(value)
@@ -250,28 +291,43 @@ func pagination(writer http.ResponseWriter, request *http.Request) (int, int, bo
 	if err == nil && request.URL.Query().Get("offset") != "" {
 		offset, err = strconv.Atoi(request.URL.Query().Get("offset"))
 	}
-	if err != nil || limit < 1 || limit > 100 || offset < 0 {
-		writeError(writer, http.StatusBadRequest, "invalid_pagination", "limit must be 1 to 100 and offset must be non-negative")
+	if err != nil || medication.ValidatePagination(limit, offset) != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_pagination", fmt.Sprintf("limit must be 1 to %d and offset must be non-negative", medication.MaxPageSize))
 		return 0, 0, false
 	}
 	return limit, offset, true
 }
 
-func writeServiceError(writer http.ResponseWriter, err error) {
+// writeServiceError maps domain errors to responses. Internal failures are logged here,
+// at the point where the underlying error would otherwise be discarded.
+func writeServiceError(writer http.ResponseWriter, request *http.Request, logger *slog.Logger, err error) {
+	var validation *medication.ValidationError
 	switch {
 	case errors.Is(err, medication.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "not_found", "medication not found")
+	case errors.Is(err, medication.ErrConflict):
+		writeError(writer, http.StatusConflict, "conflict", "medication already exists")
 	case errors.Is(err, medication.ErrInvalidPagination):
 		writeError(writer, http.StatusBadRequest, "invalid_pagination", "invalid pagination")
-	case strings.Contains(err.Error(), " is required"):
-		writeError(writer, http.StatusBadRequest, "validation_failed", err.Error())
+	case errors.As(err, &validation):
+		writeError(writer, http.StatusBadRequest, "validation_failed", validation.Error())
 	default:
+		logger.ErrorContext(request.Context(), "unhandled service error",
+			"error", err,
+			"method", request.Method,
+			"route", request.Pattern,
+			"request_id", RequestIDFromContext(request.Context()))
 		writeError(writer, http.StatusInternalServerError, "internal_error", "internal server error")
 	}
 }
 
 func writeError(writer http.ResponseWriter, status int, code, message string) {
 	writeJSON(writer, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
+func openAPIHandler(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	_, _ = writer.Write(docs.OpenAPISpec)
 }
 
 func healthHandler(writer http.ResponseWriter, _ *http.Request) {
@@ -291,7 +347,13 @@ func readinessHandler(readiness Readiness) http.HandlerFunc {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Security-Policy", "default-src 'none'")
+		if strings.HasPrefix(request.URL.Path, "/docs/") {
+			// Swagger UI needs to load its own same-origin scripts/styles and fetch the
+			// spec; every other route keeps the fully locked-down default below.
+			writer.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'")
+		} else {
+			writer.Header().Set("Content-Security-Policy", "default-src 'none'")
+		}
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")

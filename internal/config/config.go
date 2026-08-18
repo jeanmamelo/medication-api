@@ -19,6 +19,13 @@ const (
 	defaultWriteLimit      = 15 * time.Second
 	defaultIdleLimit       = 60 * time.Second
 	defaultShutdownLimit   = 10 * time.Second
+
+	defaultMaxConns          = 10
+	defaultMinConns          = 2
+	maxPoolSize              = 100
+	defaultConnLifetime      = time.Hour
+	defaultConnIdleTime      = 30 * time.Minute
+	defaultHealthCheckPeriod = time.Minute
 )
 
 // Config contains only process-level settings. Secrets are never logged.
@@ -26,6 +33,17 @@ type Config struct {
 	Environment string
 	DatabaseURL string
 	HTTP        HTTPConfig
+	Database    DatabaseConfig
+}
+
+// DatabaseConfig bounds the connection pool. These values are authoritative, so any
+// pool_* parameter in DATABASE_URL is overridden.
+type DatabaseConfig struct {
+	MaxConns          int32
+	MinConns          int32
+	MaxConnLifetime   time.Duration
+	MaxConnIdleTime   time.Duration
+	HealthCheckPeriod time.Duration
 }
 
 // HTTPConfig controls the network-facing server limits.
@@ -58,6 +76,18 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("APP_ENV must be dev, hom, or prod")
 	}
 
+	maxConns, err := poolSizeFromEnv("DB_MAX_CONNS", defaultMaxConns)
+	if err != nil {
+		return Config{}, err
+	}
+	minConns, err := poolSizeFromEnv("DB_MIN_CONNS", defaultMinConns)
+	if err != nil {
+		return Config{}, err
+	}
+	if minConns > maxConns {
+		return Config{}, fmt.Errorf("DB_MIN_CONNS must not exceed DB_MAX_CONNS")
+	}
+
 	return Config{
 		Environment: environment,
 		DatabaseURL: databaseURL,
@@ -69,6 +99,13 @@ func Load() (Config, error) {
 			IdleTimeout:       defaultIdleLimit,
 			ShutdownTimeout:   defaultShutdownLimit,
 		},
+		Database: DatabaseConfig{
+			MaxConns:          int32(maxConns),
+			MinConns:          int32(minConns),
+			MaxConnLifetime:   defaultConnLifetime,
+			MaxConnIdleTime:   defaultConnIdleTime,
+			HealthCheckPeriod: defaultHealthCheckPeriod,
+		},
 	}, nil
 }
 
@@ -77,6 +114,19 @@ func positiveIntFromEnv(key string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 || parsed > 65535 {
 		return 0, fmt.Errorf("%s must be an integer between 1 and 65535", key)
+	}
+
+	return parsed, nil
+}
+
+// poolSizeFromEnv bounds connection pool sizes separately from port numbers: the two
+// have unrelated valid ranges, and reusing the port bound produced a confusing error
+// message ("must be between 1 and 65535") for a pool size setting.
+func poolSizeFromEnv(key string, fallback int) (int, error) {
+	value := valueOrDefault(key, strconv.Itoa(fallback))
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 || parsed > maxPoolSize {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d", key, maxPoolSize)
 	}
 
 	return parsed, nil

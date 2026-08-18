@@ -11,12 +11,39 @@ import (
 
 var (
 	ErrNotFound          = errors.New("medication not found")
+	ErrConflict          = errors.New("medication already exists")
 	ErrInvalidPagination = errors.New("invalid pagination")
+	ErrValidation        = errors.New("validation failed")
 )
 
 const (
-	maxPageSize = 100
+	// DefaultPageSize and MaxPageSize bound collection reads. They are exported so the
+	// transport layer applies the same limits instead of duplicating them.
+	DefaultPageSize = 20
+	MaxPageSize     = 100
 )
+
+// ValidationError identifies the field that failed validation. Its message carries no
+// internal detail and is safe to return to clients.
+type ValidationError struct {
+	Field string
+}
+
+func (err *ValidationError) Error() string {
+	return err.Field + " is required"
+}
+
+func (err *ValidationError) Unwrap() error {
+	return ErrValidation
+}
+
+// ValidatePagination is the single definition of the pagination bounds.
+func ValidatePagination(limit, offset int) error {
+	if limit < 1 || limit > MaxPageSize || offset < 0 {
+		return ErrInvalidPagination
+	}
+	return nil
+}
 
 type Medication struct {
 	ID     string `json:"id"`
@@ -42,7 +69,9 @@ type Repository interface {
 	Create(context.Context, Medication) error
 	Get(context.Context, string) (Medication, error)
 	List(context.Context, int, int) ([]Medication, error)
-	Update(context.Context, Medication) error
+	// Update merges the supplied fields into the stored row and returns the result.
+	// Merging in the repository keeps a partial update atomic.
+	Update(context.Context, string, UpdateInput) (Medication, error)
 	Delete(context.Context, string) error
 }
 
@@ -81,34 +110,22 @@ func (service *Service) Get(ctx context.Context, id string) (Medication, error) 
 }
 
 func (service *Service) List(ctx context.Context, limit, offset int) ([]Medication, error) {
-	if limit < 1 || limit > maxPageSize || offset < 0 {
-		return nil, ErrInvalidPagination
+	if err := ValidatePagination(limit, offset); err != nil {
+		return nil, err
 	}
 	return service.repository.List(ctx, limit, offset)
 }
 
+// Update validates only the supplied fields; absent ones keep values that were already
+// validated when they were written. The merge happens in the repository so concurrent
+// partial updates cannot overwrite each other.
 func (service *Service) Update(ctx context.Context, id string, input UpdateInput) (Medication, error) {
-	current, err := service.repository.Get(ctx, id)
+	normalized, err := normalizeUpdate(input)
 	if err != nil {
 		return Medication{}, err
 	}
-	if input.Name != nil {
-		current.Name = *input.Name
-	}
-	if input.Dosage != nil {
-		current.Dosage = *input.Dosage
-	}
-	if input.Form != nil {
-		current.Form = *input.Form
-	}
-	if err := validate(&current); err != nil {
-		return Medication{}, err
-	}
-	if err := service.repository.Update(ctx, current); err != nil {
-		return Medication{}, fmt.Errorf("update medication: %w", err)
-	}
 
-	return current, nil
+	return service.repository.Update(ctx, id, normalized)
 }
 
 func (service *Service) Delete(ctx context.Context, id string) error {
@@ -137,9 +154,34 @@ func validate(medication *Medication) error {
 	return validateField("form", medication.Form)
 }
 
+// normalizeUpdate trims each supplied field and rejects any that becomes empty.
+func normalizeUpdate(input UpdateInput) (UpdateInput, error) {
+	normalized := UpdateInput{}
+	for _, field := range []struct {
+		name   string
+		value  *string
+		target **string
+	}{
+		{name: "name", value: input.Name, target: &normalized.Name},
+		{name: "dosage", value: input.Dosage, target: &normalized.Dosage},
+		{name: "form", value: input.Form, target: &normalized.Form},
+	} {
+		if field.value == nil {
+			continue
+		}
+		trimmed := strings.TrimSpace(*field.value)
+		if err := validateField(field.name, trimmed); err != nil {
+			return UpdateInput{}, err
+		}
+		*field.target = &trimmed
+	}
+
+	return normalized, nil
+}
+
 func validateField(name, value string) error {
 	if value == "" {
-		return fmt.Errorf("%s is required", name)
+		return &ValidationError{Field: name}
 	}
 	return nil
 }

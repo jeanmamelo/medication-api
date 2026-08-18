@@ -49,6 +49,15 @@ func TestRepositoryCreate(t *testing.T) {
 	}
 }
 
+func TestRepositoryCreateMapsUniqueViolation(t *testing.T) {
+	item := medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}
+	repository := &Repository{pool: &fakePool{execErr: &pgconn.PgError{Code: uniqueViolationCode}}}
+
+	if err := repository.Create(context.Background(), item); !errors.Is(err, medication.ErrConflict) {
+		t.Fatalf("Create() error = %v, want ErrConflict", err)
+	}
+}
+
 func TestRepositoryGet(t *testing.T) {
 	pool := &fakePool{row: fakeRow{item: medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}}}
 	repository := &Repository{pool: pool}
@@ -123,19 +132,45 @@ func TestRepositoryListReturnsQueryScanAndRowsErrors(t *testing.T) {
 	}
 }
 
-func TestRepositoryUpdateAndDelete(t *testing.T) {
-	pool := &fakePool{commandTag: pgconn.NewCommandTag("UPDATE 1")}
+func TestRepositoryUpdateMergesSuppliedFields(t *testing.T) {
+	merged := medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "750 mg", Form: "tablet"}
+	pool := &fakePool{row: fakeRow{item: merged}}
 	repository := &Repository{pool: pool}
-	item := medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}
+	dosage := "750 mg"
 
-	if err := repository.Update(context.Background(), item); err != nil {
+	got, err := repository.Update(context.Background(), "id", medication.UpdateInput{Dosage: &dosage})
+	if err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	if pool.execSQL != "UPDATE medications SET name = $2, dosage = $3, form = $4, updated_at = NOW() WHERE id = $1" || !reflect.DeepEqual(pool.execArgs, []any{"id", "Paracetamol", "500 mg", "tablet"}) {
-		t.Errorf("Update() query = %q, args = %#v", pool.execSQL, pool.execArgs)
+	if got != merged {
+		t.Errorf("Update() = %#v, want %#v", got, merged)
+	}
+	if want := "UPDATE medications SET name = COALESCE($2, name), dosage = COALESCE($3, dosage), form = COALESCE($4, form), updated_at = NOW() WHERE id = $1 RETURNING id, name, dosage, form"; pool.queryRowSQL != want {
+		t.Errorf("Update() query = %q, want %q", pool.queryRowSQL, want)
+	}
+	// Absent fields must reach Postgres as NULL so COALESCE keeps the stored value.
+	if want := []any{"id", (*string)(nil), &dosage, (*string)(nil)}; !reflect.DeepEqual(pool.queryRowArgs, want) {
+		t.Errorf("Update() args = %#v, want %#v", pool.queryRowArgs, want)
+	}
+}
+
+func TestRepositoryUpdateMapsNoRows(t *testing.T) {
+	repository := &Repository{pool: &fakePool{row: fakeRow{err: pgx.ErrNoRows}}}
+	if _, err := repository.Update(context.Background(), "missing", medication.UpdateInput{}); !errors.Is(err, medication.ErrNotFound) {
+		t.Fatalf("Update() error = %v, want ErrNotFound", err)
 	}
 
-	pool.commandTag = pgconn.NewCommandTag("DELETE 1")
+	wantErr := errors.New("execution failed")
+	repository.pool = &fakePool{row: fakeRow{err: wantErr}}
+	if _, err := repository.Update(context.Background(), "id", medication.UpdateInput{}); !errors.Is(err, wantErr) {
+		t.Fatalf("Update() error = %v, want wrapped %v", err, wantErr)
+	}
+}
+
+func TestRepositoryDelete(t *testing.T) {
+	pool := &fakePool{commandTag: pgconn.NewCommandTag("DELETE 1")}
+	repository := &Repository{pool: pool}
+
 	if err := repository.Delete(context.Background(), "id"); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
@@ -144,22 +179,14 @@ func TestRepositoryUpdateAndDelete(t *testing.T) {
 	}
 }
 
-func TestRepositoryUpdateAndDeleteErrors(t *testing.T) {
-	repository := &Repository{pool: &fakePool{commandTag: pgconn.NewCommandTag("UPDATE 0")}}
-	if err := repository.Update(context.Background(), medication.Medication{ID: "missing"}); !errors.Is(err, medication.ErrNotFound) {
-		t.Fatalf("Update() error = %v, want ErrNotFound", err)
-	}
-
-	repository.pool = &fakePool{commandTag: pgconn.NewCommandTag("DELETE 0")}
+func TestRepositoryDeleteErrors(t *testing.T) {
+	repository := &Repository{pool: &fakePool{commandTag: pgconn.NewCommandTag("DELETE 0")}}
 	if err := repository.Delete(context.Background(), "missing"); !errors.Is(err, medication.ErrNotFound) {
 		t.Fatalf("Delete() error = %v, want ErrNotFound", err)
 	}
 
 	wantErr := errors.New("execution failed")
 	repository.pool = &fakePool{execErr: wantErr}
-	if err := repository.Update(context.Background(), medication.Medication{}); !errors.Is(err, wantErr) {
-		t.Fatalf("Update() error = %v, want %v", err, wantErr)
-	}
 	if err := repository.Delete(context.Background(), "id"); !errors.Is(err, wantErr) {
 		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
 	}

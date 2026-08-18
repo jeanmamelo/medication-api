@@ -14,7 +14,26 @@ REST API for medication records, built with Go and PostgreSQL.
 docker compose up --build
 ```
 
-The Compose database applies the initial migration when its volume is created.
+Compose runs the `migrate` service to completion before starting the API, so local
+development exercises the same migration runner used in production.
+
+If you previously ran a version of this stack that seeded the schema through
+`docker-entrypoint-initdb.d`, reset the volume once so the runner can record its
+migrations: `docker compose down -v`.
+
+## Database migrations
+
+The production image contains the migration runner at `/migrate`. Run it as a
+pre-deploy step against the target database, with `DATABASE_URL` set to that
+database's connection string. The runner records applied versions in
+`schema_migrations` and uses a PostgreSQL advisory lock to prevent concurrent
+deploys from applying the same migration twice.
+
+To run migrations locally against a configured database:
+
+```bash
+DATABASE_URL='postgres://user:password@localhost:5432/medications' go run ./cmd/migrate
+```
 
 Check process health and database readiness:
 
@@ -23,6 +42,13 @@ Check process health and database readiness:
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
+
+## API documentation
+
+Interactive Swagger UI is served at `http://localhost:8080/docs`, backed by the raw
+OpenAPI 3.1 spec at `http://localhost:8080/openapi.yaml` (source:
+[`docs/openapi.yaml`](docs/openapi.yaml)). Both are served directly by the API binary,
+so no external tooling is required.
 
 ## API usage
 
@@ -81,6 +107,8 @@ For request and response details, see [`docs/api-contract.md`](docs/api-contract
 
 ## Test
 
+Run the following command to execute all unit tests:
+
 ```bash
 go test ./...
 ```
@@ -91,12 +119,28 @@ go test ./...
 | --- | --- | --- |
 | `APP_ENV` | `dev` | `dev`, `hom`, or `prod`. `dev` emits text logs; the others emit JSON logs. |
 | `PORT` | `8080` | HTTP listening port. |
-| `DATABASE_URL` | — | PostgreSQL connection URL. |
+| `DATABASE_URL` | — | PostgreSQL connection URL. Any `pool_*` parameter is overridden by the settings below. |
+| `DB_MAX_CONNS` | `10` | Maximum pooled database connections. |
+| `DB_MIN_CONNS` | `2` | Connections kept warm; must not exceed `DB_MAX_CONNS`. |
 
 ## Health endpoints
 
 - `GET /healthz`: process liveness check.
 - `GET /readyz`: dependency readiness check.
 - `GET /metrics`: HTTP request and response counters for local scraping.
+
+## Observability
+
+Every request carries an `X-Request-Id`: a caller-supplied value is reused when it is at
+most 64 printable ASCII characters, otherwise the server generates one. It is echoed on
+the response and included in the access log, so a client-reported failure can be traced
+to its log line.
+
+Responses in the 5xx range never expose the underlying failure to the client, but the
+real error is logged at `ERROR` level with the request ID, method, and route.
+
+`medication_http_responses_total` is labelled by `method`, `route` (the route pattern,
+not the raw path), and `status`. Requests that match no route collapse into
+`method="other",route="unmatched"` to bound label cardinality.
 
 The API uses `/v1` versioning. Collection endpoints use `limit` and `offset` pagination. The server performs graceful shutdown and keeps its security timeouts as internal defaults.

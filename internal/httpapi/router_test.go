@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +46,59 @@ func TestReadyz(t *testing.T) {
 				t.Errorf("status = %d, want %d", response.Code, test.wantStatus)
 			}
 		})
+	}
+}
+
+func TestOpenAPISpec(t *testing.T) {
+	response := httptest.NewRecorder()
+	NewRouter(AlwaysReady{}, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Content-Type"); got != "application/yaml; charset=utf-8" {
+		t.Errorf("content type = %q", got)
+	}
+	if body := response.Body.String(); !strings.Contains(body, "openapi: 3.1.0") || !strings.Contains(body, "/v1/medications") {
+		t.Errorf("body missing expected spec content: %q", body)
+	}
+	assertSecurityHeaders(t, response)
+}
+
+func TestSwaggerUIServesDocs(t *testing.T) {
+	router := NewRouter(AlwaysReady{}, nil)
+
+	index := httptest.NewRecorder()
+	router.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/docs/", nil))
+	if index.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", index.Code, http.StatusOK)
+	}
+	if body := index.Body.String(); !strings.Contains(body, "swagger-ui-bundle.js") {
+		t.Errorf("index body missing swagger-ui-bundle.js reference: %q", body)
+	}
+	if got, want := index.Header().Get("Content-Security-Policy"), "default-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"; got != want {
+		t.Errorf("docs CSP = %q, want %q", got, want)
+	}
+
+	redirect := httptest.NewRecorder()
+	router.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	if redirect.Code != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d", redirect.Code, http.StatusTemporaryRedirect)
+	}
+	if got := redirect.Header().Get("Location"); got != "/docs/" {
+		t.Errorf("Location = %q, want %q", got, "/docs/")
+	}
+
+	asset := httptest.NewRecorder()
+	router.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/docs/swagger-ui-bundle.js", nil))
+	if asset.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", asset.Code, http.StatusOK)
+	}
+
+	strictElsewhere := httptest.NewRecorder()
+	router.ServeHTTP(strictElsewhere, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if got, want := strictElsewhere.Header().Get("Content-Security-Policy"), "default-src 'none'"; got != want {
+		t.Errorf("non-docs CSP = %q, want %q", got, want)
 	}
 }
 
@@ -93,6 +147,16 @@ func TestMedicationReadUpdateDeleteEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeleteMedicationReturnsNoContentWhenAlreadyGone(t *testing.T) {
+	service := &medicationServiceStub{deleteErr: medication.ErrNotFound}
+	router := NewRouter(AlwaysReady{}, service)
+
+	response := perform(router, http.MethodDelete, "/v1/medications/missing", "")
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("DELETE status/body = %d/%q", response.Code, response.Body.String())
+	}
+}
+
 func TestMedicationEndpointsMapServiceErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -104,13 +168,16 @@ func TestMedicationEndpointsMapServiceErrors(t *testing.T) {
 	}{
 		{name: "get not found", method: http.MethodGet, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.getErr = medication.ErrNotFound }, want: http.StatusNotFound},
 		{name: "get internal", method: http.MethodGet, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.getErr = errors.New("database failed") }, want: http.StatusInternalServerError},
-		{name: "create validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("name is required") }, want: http.StatusBadRequest},
+		{name: "create validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = &medication.ValidationError{Field: "name"} }, want: http.StatusBadRequest},
+		{name: "create wrapped validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) {
+			s.createErr = fmt.Errorf("create medication: %w", &medication.ValidationError{Field: "dosage"})
+		}, want: http.StatusBadRequest},
 		{name: "create internal", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+		{name: "create conflict", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = medication.ErrConflict }, want: http.StatusConflict},
 		{name: "list invalid pagination", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = medication.ErrInvalidPagination }, want: http.StatusBadRequest},
 		{name: "list internal", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = errors.New("database failed") }, want: http.StatusInternalServerError},
 		{name: "update not found", method: http.MethodPatch, path: "/v1/medications/id", body: `{"name":"x"}`, setErr: func(s *medicationServiceStub) { s.updateErr = medication.ErrNotFound }, want: http.StatusNotFound},
 		{name: "update internal", method: http.MethodPatch, path: "/v1/medications/id", body: `{"name":"x"}`, setErr: func(s *medicationServiceStub) { s.updateErr = errors.New("database failed") }, want: http.StatusInternalServerError},
-		{name: "delete not found", method: http.MethodDelete, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.deleteErr = medication.ErrNotFound }, want: http.StatusNotFound},
 		{name: "delete internal", method: http.MethodDelete, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.deleteErr = errors.New("database failed") }, want: http.StatusInternalServerError},
 	}
 	for _, test := range tests {
@@ -154,6 +221,15 @@ func TestMedicationRequestValidationAndPagination(t *testing.T) {
 	}
 }
 
+func TestValidationErrorMessageExcludesWrapperContext(t *testing.T) {
+	service := &medicationServiceStub{createErr: fmt.Errorf("create medication: %w", &medication.ValidationError{Field: "dosage"})}
+	response := perform(NewRouter(AlwaysReady{}, service), http.MethodPost, "/v1/medications", `{"name":"x","dosage":"y","form":"z"}`)
+
+	if body := response.Body.String(); !strings.Contains(body, `"message":"dosage is required"`) {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestMetricsAndRequestLogs(t *testing.T) {
 	var logs strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -162,8 +238,11 @@ func TestMetricsAndRequestLogs(t *testing.T) {
 
 	perform(router, http.MethodGet, "/v1/medications/secret-id", "")
 	metrics := perform(router, http.MethodGet, "/metrics", "")
-	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "medication_http_requests_total 1") || !strings.Contains(metrics.Body.String(), `status="200"`) {
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "medication_http_requests_total 1") {
 		t.Fatalf("metrics = %d %q", metrics.Code, metrics.Body.String())
+	}
+	if want := `medication_http_responses_total{method="GET",route="GET /v1/medications/{id}",status="200"} 1`; !strings.Contains(metrics.Body.String(), want) {
+		t.Errorf("metrics missing labelled series %q: %q", want, metrics.Body.String())
 	}
 	if got := metrics.Header().Get("Content-Type"); got != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Errorf("metrics content type = %q", got)
@@ -174,6 +253,90 @@ func TestMetricsAndRequestLogs(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "secret-id") {
 		t.Errorf("log exposed medication ID: %q", logOutput)
+	}
+}
+
+func TestMetricsCollapseUnmatchedRequests(t *testing.T) {
+	router := NewRouter(AlwaysReady{}, &medicationServiceStub{})
+	perform(router, "BREW", "/nowhere", "")
+
+	metrics := perform(router, http.MethodGet, "/metrics", "")
+	if want := `medication_http_responses_total{method="other",route="unmatched",status="404"} 1`; !strings.Contains(metrics.Body.String(), want) {
+		t.Errorf("metrics missing %q: %q", want, metrics.Body.String())
+	}
+}
+
+func TestInternalErrorsAreLoggedWithRequestID(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	service := &medicationServiceStub{getErr: errors.New("connection refused by database")}
+	router := NewRouterWithLogger(AlwaysReady{}, service, logger)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/medications/id", nil)
+	request.Header.Set(RequestIDHeader, "trace-me")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if body := response.Body.String(); strings.Contains(body, "connection refused") {
+		t.Errorf("response leaked the underlying error: %q", body)
+	}
+	logOutput := logs.String()
+	for _, want := range []string{"unhandled service error", "connection refused by database", "request_id=trace-me", "level=ERROR"} {
+		if !strings.Contains(logOutput, want) {
+			t.Errorf("log missing %q: %q", want, logOutput)
+		}
+	}
+}
+
+func TestRequestIDIsEchoedAndGenerated(t *testing.T) {
+	router := NewRouter(AlwaysReady{}, &medicationServiceStub{})
+
+	for _, test := range []struct {
+		name, supplied string
+		wantEcho       bool
+	}{
+		{name: "reuses safe inbound id", supplied: "abc-123", wantEcho: true},
+		{name: "replaces oversized id", supplied: strings.Repeat("x", maxRequestIDLength+1)},
+		{name: "replaces id with control characters", supplied: "bad\nid"},
+		{name: "generates when absent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			if test.supplied != "" {
+				request.Header.Set(RequestIDHeader, test.supplied)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			got := response.Header().Get(RequestIDHeader)
+			if got == "" {
+				t.Fatal("response has no request ID")
+			}
+			if test.wantEcho && got != test.supplied {
+				t.Errorf("request ID = %q, want %q", got, test.supplied)
+			}
+			if !test.wantEcho && got == test.supplied {
+				t.Errorf("unsafe request ID %q was echoed back", got)
+			}
+		})
+	}
+}
+
+func TestRequestIDReachesHandlerContext(t *testing.T) {
+	var seen string
+	handler := withRequestID(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		seen = RequestIDFromContext(request.Context())
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set(RequestIDHeader, "trace-me")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if seen != "trace-me" {
+		t.Fatalf("RequestIDFromContext() = %q, want %q", seen, "trace-me")
 	}
 }
 

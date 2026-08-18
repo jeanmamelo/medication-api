@@ -2,6 +2,13 @@
 
 Base path: `/v1`
 
+## API documentation
+
+The full OpenAPI 3.1 description of this contract is served at `GET /openapi.yaml`
+(source: [`openapi.yaml`](openapi.yaml), embedded into the binary at build time) and
+rendered as interactive Swagger UI at `GET /docs`. Keep `openapi.yaml` in sync with any
+change documented below.
+
 ## Medication resource
 
 ```json
@@ -24,6 +31,25 @@ Base path: `/v1`
 | `GET` | `/v1/medications/{id}` | Retrieve one medication. | `200 OK` |
 | `PATCH` | `/v1/medications/{id}` | Partially update one medication. | `200 OK` |
 | `DELETE` | `/v1/medications/{id}` | Delete one medication. | `204 No Content` |
+
+`PATCH` accepts any subset of `name`, `dosage`, and `form`; at least one is required.
+Omitted fields are left untouched. The merge is performed server-side in a single
+statement, so concurrent partial updates of different fields cannot overwrite each other.
+
+`GET /v1/medications` accepts `limit` (1–100, default 20) and a non-negative `offset`.
+
+`POST` returns `409 Conflict` (`code: "conflict"`) on the rare case of a server-generated
+`id` colliding with an existing medication.
+
+`DELETE` is idempotent and always returns `204 No Content`, whether or not a medication
+with that `id` existed, so the response never reveals which IDs are valid.
+
+## Correlation
+
+| Header | Direction | Description |
+| --- | --- | --- |
+| `X-Request-Id` | request (optional) | Reused when it is at most 64 printable ASCII characters; otherwise replaced. |
+| `X-Request-Id` | response | Always present. Appears in the access log and in any server-side error log for the request. |
 
 ## Error shape
 

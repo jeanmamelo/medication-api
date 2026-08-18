@@ -1,0 +1,372 @@
+openapi: 3.1.0
+info:
+  title: Medication API
+  description: >
+    REST API for medication records. See `AGENTS.md` and `docs/api-contract.md`
+    in the repository for implementation notes.
+  version: "1.0"
+  license:
+    name: Proprietary
+servers:
+  - url: /
+    description: Current host
+tags:
+  - name: medications
+    description: Medication record CRUD
+  - name: operations
+    description: Health, readiness, and metrics endpoints
+
+paths:
+  /healthz:
+    get:
+      tags: [operations]
+      summary: Liveness check
+      description: Always returns 200 while the process is running; does not check dependencies.
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+              example:
+                status: ok
+
+  /readyz:
+    get:
+      tags: [operations]
+      summary: Readiness check
+      description: Reports whether dependencies required to serve traffic (e.g. the database) are available.
+      operationId: getReadyz
+      responses:
+        "200":
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+              example:
+                status: ready
+        "503":
+          description: A required dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+              example:
+                status: unavailable
+
+  /metrics:
+    get:
+      tags: [operations]
+      summary: Prometheus metrics
+      description: In-process HTTP request/response counters in Prometheus text exposition format.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Metrics snapshot.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/medications:
+    post:
+      tags: [medications]
+      summary: Create a medication
+      operationId: createMedication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MedicationCreateRequest"
+            example:
+              name: Paracetamol
+              dosage: 500 mg
+              form: tablet
+      responses:
+        "201":
+          description: Medication created.
+          headers:
+            Location:
+              description: Path of the newly created medication.
+              schema:
+                type: string
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Medication"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags: [medications]
+      summary: List medications
+      description: Returns medications with bounded, offset-based pagination.
+      operationId: listMedications
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Page of medications.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MedicationList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/medications/{id}:
+    parameters:
+      - $ref: "#/components/parameters/MedicationId"
+    get:
+      tags: [medications]
+      summary: Retrieve a medication
+      operationId: getMedication
+      responses:
+        "200":
+          description: Medication found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Medication"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags: [medications]
+      summary: Partially update a medication
+      description: >
+        Accepts any subset of `name`, `dosage`, and `form`; at least one is required.
+        Omitted fields are left untouched. The merge is applied server-side in a
+        single statement, so concurrent partial updates of different fields cannot
+        overwrite each other.
+      operationId: updateMedication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MedicationUpdateRequest"
+            example:
+              dosage: 750 mg
+      responses:
+        "200":
+          description: Medication updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Medication"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [medications]
+      summary: Delete a medication
+      description: >
+        Idempotent: always returns 204, whether or not a medication with that id
+        existed, so the response never reveals which ids are valid.
+      operationId: deleteMedication
+      responses:
+        "204":
+          description: Medication deleted, or already absent.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  parameters:
+    MedicationId:
+      name: id
+      in: path
+      required: true
+      description: Server-generated medication identifier (UUIDv4).
+      schema:
+        type: string
+        format: uuid
+      example: 018f2f15-0cf5-7e54-9ecb-65df2a99e422
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      description: Number of items to skip.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  headers:
+    X-Request-Id:
+      description: >
+        Correlation id for the request. Reused from the request when it is at
+        most 64 printable ASCII characters; otherwise replaced. Always present
+        on the response and appears in server-side logs for the request.
+      schema:
+        type: string
+
+  schemas:
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+
+    Medication:
+      type: object
+      description: A medication record.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Server-generated identifier.
+          readOnly: true
+        name:
+          type: string
+          description: Trimmed, required.
+        dosage:
+          type: string
+          description: Trimmed, required.
+        form:
+          type: string
+          description: Trimmed, required.
+      required: [id, name, dosage, form]
+      example:
+        id: 018f2f15-0cf5-7e54-9ecb-65df2a99e422
+        name: Paracetamol
+        dosage: 500 mg
+        form: tablet
+
+    MedicationCreateRequest:
+      type: object
+      description: All three fields are required, non-empty after trimming. Unknown fields are rejected.
+      properties:
+        name:
+          type: string
+        dosage:
+          type: string
+        form:
+          type: string
+      required: [name, dosage, form]
+      additionalProperties: false
+
+    MedicationUpdateRequest:
+      type: object
+      description: >
+        Any subset of the three fields; at least one must be present. Supplied
+        fields must be non-empty after trimming. Unknown fields are rejected.
+      properties:
+        name:
+          type: string
+        dosage:
+          type: string
+        form:
+          type: string
+      minProperties: 1
+      additionalProperties: false
+
+    MedicationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Medication"
+        limit:
+          type: integer
+        offset:
+          type: integer
+      required: [items, limit, offset]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code.
+            message:
+              type: string
+              description: Public, safe-to-display message. Never leaks driver or implementation detail.
+          required: [code, message]
+      required: [error]
+
+  responses:
+    BadRequest:
+      description: Request failed validation, or the JSON body/pagination parameters were malformed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            validation_failed:
+              value:
+                error:
+                  code: validation_failed
+                  message: name, dosage, and form are required
+            invalid_pagination:
+              value:
+                error:
+                  code: invalid_pagination
+                  message: "limit must be 1 to 100 and offset must be non-negative"
+            invalid_request:
+              value:
+                error:
+                  code: invalid_request
+                  message: request body must be valid JSON
+    NotFound:
+      description: No medication exists with the given id.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: not_found
+              message: medication not found
+    Conflict:
+      description: The server-generated id collided with an existing medication.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: conflict
+              message: medication already exists
+    InternalError:
+      description: Unexpected server error. The response never leaks driver-level or implementation detail.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: internal_error
+              message: internal server error
