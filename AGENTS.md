@@ -40,8 +40,8 @@ Standard Go layout, dependency direction flows inward toward `internal/medicatio
 - `cmd/migrate` — standalone binary that applies `migrations/*.up.sql` in version order
   inside a transaction each, tracked in a `schema_migrations` table, guarded by a
   Postgres advisory lock (`pg_advisory_lock`) so concurrent deploys can't double-apply.
-  This is the binary copied into the production image and run as Render's Pre-Deploy
-  Command (see README).
+  This is the binary copied into the production image and run as a pre-deploy step
+  (see README).
 - `internal/medication` — domain package: the `Medication` type, `Service` (business
   logic: validation, trimming, pagination bounds), and the `Repository`/`IDGenerator`
   interfaces it depends on. Has no knowledge of HTTP or SQL. `RandomUUIDGenerator`

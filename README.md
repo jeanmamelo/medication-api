@@ -23,16 +23,11 @@ migrations: `docker compose down -v`.
 
 ## Database migrations
 
-The production image contains the migration runner at `/migrate`. On Render,
-configure the service's **Pre-Deploy Command** as:
-
-```bash
-/migrate
-```
-
-Set `DATABASE_URL` to the Render PostgreSQL connection string. The runner
-records applied versions in `schema_migrations` and uses a PostgreSQL advisory
-lock to prevent concurrent deploys from applying the same migration twice.
+The production image contains the migration runner at `/migrate`. Run it as a
+pre-deploy step against the target database, with `DATABASE_URL` set to that
+database's connection string. The runner records applied versions in
+`schema_migrations` and uses a PostgreSQL advisory lock to prevent concurrent
+deploys from applying the same migration twice.
 
 To run migrations locally against a configured database:
 
