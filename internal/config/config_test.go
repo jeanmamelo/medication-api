@@ -15,8 +15,8 @@ func TestLoadUsesSecureDefaults(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.Environment != "dev" {
-		t.Errorf("Environment = %q, want dev", cfg.Environment)
+	if cfg.Environment != "local" {
+		t.Errorf("Environment = %q, want local", cfg.Environment)
 	}
 	if cfg.HTTP.Address != ":8080" {
 		t.Errorf("Address = %q, want :8080", cfg.HTTP.Address)
