@@ -31,6 +31,12 @@ statement, so concurrent partial updates of different fields cannot overwrite ea
 
 `GET /v1/medications` accepts `limit` (1–100, default 20) and a non-negative `offset`.
 
+`POST` returns `409 Conflict` (`code: "conflict"`) on the rare case of a server-generated
+`id` colliding with an existing medication.
+
+`DELETE` is idempotent and always returns `204 No Content`, whether or not a medication
+with that `id` existed, so the response never reveals which IDs are valid.
+
 ## Correlation
 
 | Header | Direction | Description |

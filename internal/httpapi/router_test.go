@@ -94,6 +94,16 @@ func TestMedicationReadUpdateDeleteEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeleteMedicationReturnsNoContentWhenAlreadyGone(t *testing.T) {
+	service := &medicationServiceStub{deleteErr: medication.ErrNotFound}
+	router := NewRouter(AlwaysReady{}, service)
+
+	response := perform(router, http.MethodDelete, "/v1/medications/missing", "")
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("DELETE status/body = %d/%q", response.Code, response.Body.String())
+	}
+}
+
 func TestMedicationEndpointsMapServiceErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -110,11 +120,11 @@ func TestMedicationEndpointsMapServiceErrors(t *testing.T) {
 			s.createErr = fmt.Errorf("create medication: %w", &medication.ValidationError{Field: "dosage"})
 		}, want: http.StatusBadRequest},
 		{name: "create internal", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("database failed") }, want: http.StatusInternalServerError},
+		{name: "create conflict", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = medication.ErrConflict }, want: http.StatusConflict},
 		{name: "list invalid pagination", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = medication.ErrInvalidPagination }, want: http.StatusBadRequest},
 		{name: "list internal", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = errors.New("database failed") }, want: http.StatusInternalServerError},
 		{name: "update not found", method: http.MethodPatch, path: "/v1/medications/id", body: `{"name":"x"}`, setErr: func(s *medicationServiceStub) { s.updateErr = medication.ErrNotFound }, want: http.StatusNotFound},
 		{name: "update internal", method: http.MethodPatch, path: "/v1/medications/id", body: `{"name":"x"}`, setErr: func(s *medicationServiceStub) { s.updateErr = errors.New("database failed") }, want: http.StatusInternalServerError},
-		{name: "delete not found", method: http.MethodDelete, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.deleteErr = medication.ErrNotFound }, want: http.StatusNotFound},
 		{name: "delete internal", method: http.MethodDelete, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.deleteErr = errors.New("database failed") }, want: http.StatusInternalServerError},
 	}
 	for _, test := range tests {

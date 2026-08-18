@@ -22,6 +22,7 @@ const (
 
 	defaultMaxConns          = 10
 	defaultMinConns          = 2
+	maxPoolSize              = 100
 	defaultConnLifetime      = time.Hour
 	defaultConnIdleTime      = 30 * time.Minute
 	defaultHealthCheckPeriod = time.Minute
@@ -75,11 +76,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("APP_ENV must be dev, hom, or prod")
 	}
 
-	maxConns, err := positiveIntFromEnv("DB_MAX_CONNS", defaultMaxConns)
+	maxConns, err := poolSizeFromEnv("DB_MAX_CONNS", defaultMaxConns)
 	if err != nil {
 		return Config{}, err
 	}
-	minConns, err := positiveIntFromEnv("DB_MIN_CONNS", defaultMinConns)
+	minConns, err := poolSizeFromEnv("DB_MIN_CONNS", defaultMinConns)
 	if err != nil {
 		return Config{}, err
 	}
@@ -113,6 +114,19 @@ func positiveIntFromEnv(key string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 || parsed > 65535 {
 		return 0, fmt.Errorf("%s must be an integer between 1 and 65535", key)
+	}
+
+	return parsed, nil
+}
+
+// poolSizeFromEnv bounds connection pool sizes separately from port numbers: the two
+// have unrelated valid ranges, and reusing the port bound produced a confusing error
+// message ("must be between 1 and 65535") for a pool size setting.
+func poolSizeFromEnv(key string, fallback int) (int, error) {
+	value := valueOrDefault(key, strconv.Itoa(fallback))
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 || parsed > maxPoolSize {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d", key, maxPoolSize)
 	}
 
 	return parsed, nil

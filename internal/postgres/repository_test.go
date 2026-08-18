@@ -49,6 +49,15 @@ func TestRepositoryCreate(t *testing.T) {
 	}
 }
 
+func TestRepositoryCreateMapsUniqueViolation(t *testing.T) {
+	item := medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}
+	repository := &Repository{pool: &fakePool{execErr: &pgconn.PgError{Code: uniqueViolationCode}}}
+
+	if err := repository.Create(context.Background(), item); !errors.Is(err, medication.ErrConflict) {
+		t.Fatalf("Create() error = %v, want ErrConflict", err)
+	}
+}
+
 func TestRepositoryGet(t *testing.T) {
 	pool := &fakePool{row: fakeRow{item: medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}}}
 	repository := &Repository{pool: pool}

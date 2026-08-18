@@ -254,7 +254,7 @@ func updateMedicationHandler(service MedicationService, logger *slog.Logger) htt
 
 func deleteMedicationHandler(service MedicationService, logger *slog.Logger) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if err := service.Delete(request.Context(), request.PathValue("id")); err != nil {
+		if err := service.Delete(request.Context(), request.PathValue("id")); err != nil && !errors.Is(err, medication.ErrNotFound) {
 			writeServiceError(writer, request, logger, err)
 			return
 		}
@@ -301,6 +301,8 @@ func writeServiceError(writer http.ResponseWriter, request *http.Request, logger
 	switch {
 	case errors.Is(err, medication.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "not_found", "medication not found")
+	case errors.Is(err, medication.ErrConflict):
+		writeError(writer, http.StatusConflict, "conflict", "medication already exists")
 	case errors.Is(err, medication.ErrInvalidPagination):
 		writeError(writer, http.StatusBadRequest, "invalid_pagination", "invalid pagination")
 	case errors.As(err, &validation):

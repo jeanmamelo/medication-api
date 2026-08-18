@@ -12,6 +12,10 @@ import (
 	"github.com/jeanmamelo/medication-api/internal/medication"
 )
 
+// uniqueViolationCode is the Postgres error code for a unique/primary key constraint
+// violation. See https://www.postgresql.org/docs/current/errcodes-appendix.html.
+const uniqueViolationCode = "23505"
+
 type Repository struct {
 	pool pool
 }
@@ -33,6 +37,10 @@ func (repository *Repository) Ready(ctx context.Context) error {
 
 func (repository *Repository) Create(ctx context.Context, item medication.Medication) error {
 	_, err := repository.pool.Exec(ctx, `INSERT INTO medications (id, name, dosage, form) VALUES ($1, $2, $3, $4)`, item.ID, item.Name, item.Dosage, item.Form)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
+		return medication.ErrConflict
+	}
 	return err
 }
 

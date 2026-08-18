@@ -11,6 +11,7 @@ import (
 
 var (
 	ErrNotFound          = errors.New("medication not found")
+	ErrConflict          = errors.New("medication already exists")
 	ErrInvalidPagination = errors.New("invalid pagination")
 	ErrValidation        = errors.New("validation failed")
 )

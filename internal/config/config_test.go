@@ -59,6 +59,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "invalid database URL", key: "DATABASE_URL", value: "https://example.com"},
 		{name: "invalid max connections", key: "DB_MAX_CONNS", value: "zero"},
 		{name: "non-positive min connections", key: "DB_MIN_CONNS", value: "0"},
+		{name: "out of range max connections", key: "DB_MAX_CONNS", value: "101"},
 	}
 
 	for _, test := range tests {
