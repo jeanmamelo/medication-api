@@ -43,6 +43,13 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
+## API documentation
+
+Interactive Swagger UI is served at `http://localhost:8080/docs`, backed by the raw
+OpenAPI 3.1 spec at `http://localhost:8080/openapi.yaml` (source:
+[`docs/openapi.yaml`](docs/openapi.yaml)). Both are served directly by the API binary,
+so no external tooling is required.
+
 ## API usage
 
 Create a medication (`201 Created`):

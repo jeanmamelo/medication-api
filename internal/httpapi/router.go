@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jeanmamelo/medication-api/docs"
+	"github.com/jeanmamelo/medication-api/internal/httpapi/swaggerui"
 	"github.com/jeanmamelo/medication-api/internal/medication"
 )
 
@@ -57,6 +59,8 @@ func NewRouterWithLogger(readiness Readiness, medications MedicationService, log
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("GET /readyz", readinessHandler(readiness))
 	mux.Handle("GET /metrics", metrics)
+	mux.HandleFunc("GET /openapi.yaml", openAPIHandler)
+	mux.Handle("GET /docs/", http.StripPrefix("/docs/", http.FileServerFS(swaggerui.FS)))
 	if medications != nil {
 		mux.HandleFunc("POST /v1/medications", createMedicationHandler(medications, logger))
 		mux.HandleFunc("GET /v1/medications", listMedicationsHandler(medications, logger))
@@ -321,6 +325,11 @@ func writeError(writer http.ResponseWriter, status int, code, message string) {
 	writeJSON(writer, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }
 
+func openAPIHandler(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	_, _ = writer.Write(docs.OpenAPISpec)
+}
+
 func healthHandler(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -338,7 +347,13 @@ func readinessHandler(readiness Readiness) http.HandlerFunc {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Security-Policy", "default-src 'none'")
+		if strings.HasPrefix(request.URL.Path, "/docs/") {
+			// Swagger UI needs to load its own same-origin scripts/styles and fetch the
+			// spec; every other route keeps the fully locked-down default below.
+			writer.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'")
+		} else {
+			writer.Header().Set("Content-Security-Policy", "default-src 'none'")
+		}
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")

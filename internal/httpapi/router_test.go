@@ -49,6 +49,59 @@ func TestReadyz(t *testing.T) {
 	}
 }
 
+func TestOpenAPISpec(t *testing.T) {
+	response := httptest.NewRecorder()
+	NewRouter(AlwaysReady{}, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Content-Type"); got != "application/yaml; charset=utf-8" {
+		t.Errorf("content type = %q", got)
+	}
+	if body := response.Body.String(); !strings.Contains(body, "openapi: 3.1.0") || !strings.Contains(body, "/v1/medications") {
+		t.Errorf("body missing expected spec content: %q", body)
+	}
+	assertSecurityHeaders(t, response)
+}
+
+func TestSwaggerUIServesDocs(t *testing.T) {
+	router := NewRouter(AlwaysReady{}, nil)
+
+	index := httptest.NewRecorder()
+	router.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/docs/", nil))
+	if index.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", index.Code, http.StatusOK)
+	}
+	if body := index.Body.String(); !strings.Contains(body, "swagger-ui-bundle.js") {
+		t.Errorf("index body missing swagger-ui-bundle.js reference: %q", body)
+	}
+	if got, want := index.Header().Get("Content-Security-Policy"), "default-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"; got != want {
+		t.Errorf("docs CSP = %q, want %q", got, want)
+	}
+
+	redirect := httptest.NewRecorder()
+	router.ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	if redirect.Code != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want %d", redirect.Code, http.StatusTemporaryRedirect)
+	}
+	if got := redirect.Header().Get("Location"); got != "/docs/" {
+		t.Errorf("Location = %q, want %q", got, "/docs/")
+	}
+
+	asset := httptest.NewRecorder()
+	router.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/docs/swagger-ui-bundle.js", nil))
+	if asset.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", asset.Code, http.StatusOK)
+	}
+
+	strictElsewhere := httptest.NewRecorder()
+	router.ServeHTTP(strictElsewhere, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if got, want := strictElsewhere.Header().Get("Content-Security-Policy"), "default-src 'none'"; got != want {
+		t.Errorf("non-docs CSP = %q, want %q", got, want)
+	}
+}
+
 func TestMedicationEndpoints(t *testing.T) {
 	item := medication.Medication{ID: "id", Name: "Paracetamol", Dosage: "500 mg", Form: "tablet"}
 	service := medicationServiceStub{item: item}

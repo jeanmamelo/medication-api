@@ -2,6 +2,13 @@
 
 Base path: `/v1`
 
+## API documentation
+
+The full OpenAPI 3.1 description of this contract is served at `GET /openapi.yaml`
+(source: [`openapi.yaml`](openapi.yaml), embedded into the binary at build time) and
+rendered as interactive Swagger UI at `GET /docs`. Keep `openapi.yaml` in sync with any
+change documented below.
+
 ## Medication resource
 
 ```json
