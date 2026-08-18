@@ -31,6 +31,13 @@ statement, so concurrent partial updates of different fields cannot overwrite ea
 
 `GET /v1/medications` accepts `limit` (1–100, default 20) and a non-negative `offset`.
 
+## Correlation
+
+| Header | Direction | Description |
+| --- | --- | --- |
+| `X-Request-Id` | request (optional) | Reused when it is at most 64 printable ASCII characters; otherwise replaced. |
+| `X-Request-Id` | response | Always present. Appears in the access log and in any server-side error log for the request. |
+
 ## Error shape
 
 ```json

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -104,7 +105,10 @@ func TestMedicationEndpointsMapServiceErrors(t *testing.T) {
 	}{
 		{name: "get not found", method: http.MethodGet, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.getErr = medication.ErrNotFound }, want: http.StatusNotFound},
 		{name: "get internal", method: http.MethodGet, path: "/v1/medications/id", setErr: func(s *medicationServiceStub) { s.getErr = errors.New("database failed") }, want: http.StatusInternalServerError},
-		{name: "create validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("name is required") }, want: http.StatusBadRequest},
+		{name: "create validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = &medication.ValidationError{Field: "name"} }, want: http.StatusBadRequest},
+		{name: "create wrapped validation", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) {
+			s.createErr = fmt.Errorf("create medication: %w", &medication.ValidationError{Field: "dosage"})
+		}, want: http.StatusBadRequest},
 		{name: "create internal", method: http.MethodPost, path: "/v1/medications", body: `{"name":"x","dosage":"y","form":"z"}`, setErr: func(s *medicationServiceStub) { s.createErr = errors.New("database failed") }, want: http.StatusInternalServerError},
 		{name: "list invalid pagination", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = medication.ErrInvalidPagination }, want: http.StatusBadRequest},
 		{name: "list internal", method: http.MethodGet, path: "/v1/medications", setErr: func(s *medicationServiceStub) { s.listErr = errors.New("database failed") }, want: http.StatusInternalServerError},
@@ -154,6 +158,15 @@ func TestMedicationRequestValidationAndPagination(t *testing.T) {
 	}
 }
 
+func TestValidationErrorMessageExcludesWrapperContext(t *testing.T) {
+	service := &medicationServiceStub{createErr: fmt.Errorf("create medication: %w", &medication.ValidationError{Field: "dosage"})}
+	response := perform(NewRouter(AlwaysReady{}, service), http.MethodPost, "/v1/medications", `{"name":"x","dosage":"y","form":"z"}`)
+
+	if body := response.Body.String(); !strings.Contains(body, `"message":"dosage is required"`) {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestMetricsAndRequestLogs(t *testing.T) {
 	var logs strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -162,8 +175,11 @@ func TestMetricsAndRequestLogs(t *testing.T) {
 
 	perform(router, http.MethodGet, "/v1/medications/secret-id", "")
 	metrics := perform(router, http.MethodGet, "/metrics", "")
-	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "medication_http_requests_total 1") || !strings.Contains(metrics.Body.String(), `status="200"`) {
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "medication_http_requests_total 1") {
 		t.Fatalf("metrics = %d %q", metrics.Code, metrics.Body.String())
+	}
+	if want := `medication_http_responses_total{method="GET",route="GET /v1/medications/{id}",status="200"} 1`; !strings.Contains(metrics.Body.String(), want) {
+		t.Errorf("metrics missing labelled series %q: %q", want, metrics.Body.String())
 	}
 	if got := metrics.Header().Get("Content-Type"); got != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Errorf("metrics content type = %q", got)
@@ -174,6 +190,90 @@ func TestMetricsAndRequestLogs(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "secret-id") {
 		t.Errorf("log exposed medication ID: %q", logOutput)
+	}
+}
+
+func TestMetricsCollapseUnmatchedRequests(t *testing.T) {
+	router := NewRouter(AlwaysReady{}, &medicationServiceStub{})
+	perform(router, "BREW", "/nowhere", "")
+
+	metrics := perform(router, http.MethodGet, "/metrics", "")
+	if want := `medication_http_responses_total{method="other",route="unmatched",status="404"} 1`; !strings.Contains(metrics.Body.String(), want) {
+		t.Errorf("metrics missing %q: %q", want, metrics.Body.String())
+	}
+}
+
+func TestInternalErrorsAreLoggedWithRequestID(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	service := &medicationServiceStub{getErr: errors.New("connection refused by database")}
+	router := NewRouterWithLogger(AlwaysReady{}, service, logger)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/medications/id", nil)
+	request.Header.Set(RequestIDHeader, "trace-me")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if body := response.Body.String(); strings.Contains(body, "connection refused") {
+		t.Errorf("response leaked the underlying error: %q", body)
+	}
+	logOutput := logs.String()
+	for _, want := range []string{"unhandled service error", "connection refused by database", "request_id=trace-me", "level=ERROR"} {
+		if !strings.Contains(logOutput, want) {
+			t.Errorf("log missing %q: %q", want, logOutput)
+		}
+	}
+}
+
+func TestRequestIDIsEchoedAndGenerated(t *testing.T) {
+	router := NewRouter(AlwaysReady{}, &medicationServiceStub{})
+
+	for _, test := range []struct {
+		name, supplied string
+		wantEcho       bool
+	}{
+		{name: "reuses safe inbound id", supplied: "abc-123", wantEcho: true},
+		{name: "replaces oversized id", supplied: strings.Repeat("x", maxRequestIDLength+1)},
+		{name: "replaces id with control characters", supplied: "bad\nid"},
+		{name: "generates when absent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			if test.supplied != "" {
+				request.Header.Set(RequestIDHeader, test.supplied)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			got := response.Header().Get(RequestIDHeader)
+			if got == "" {
+				t.Fatal("response has no request ID")
+			}
+			if test.wantEcho && got != test.supplied {
+				t.Errorf("request ID = %q, want %q", got, test.supplied)
+			}
+			if !test.wantEcho && got == test.supplied {
+				t.Errorf("unsafe request ID %q was echoed back", got)
+			}
+		})
+	}
+}
+
+func TestRequestIDReachesHandlerContext(t *testing.T) {
+	var seen string
+	handler := withRequestID(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		seen = RequestIDFromContext(request.Context())
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set(RequestIDHeader, "trace-me")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if seen != "trace-me" {
+		t.Fatalf("RequestIDFromContext() = %q, want %q", seen, "trace-me")
 	}
 }
 

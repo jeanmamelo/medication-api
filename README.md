@@ -105,6 +105,8 @@ For request and response details, see [`docs/api-contract.md`](docs/api-contract
 
 ## Test
 
+Run the following command to execute all unit tests:
+
 ```bash
 go test ./...
 ```
@@ -124,5 +126,19 @@ go test ./...
 - `GET /healthz`: process liveness check.
 - `GET /readyz`: dependency readiness check.
 - `GET /metrics`: HTTP request and response counters for local scraping.
+
+## Observability
+
+Every request carries an `X-Request-Id`: a caller-supplied value is reused when it is at
+most 64 printable ASCII characters, otherwise the server generates one. It is echoed on
+the response and included in the access log, so a client-reported failure can be traced
+to its log line.
+
+Responses in the 5xx range never expose the underlying failure to the client, but the
+real error is logged at `ERROR` level with the request ID, method, and route.
+
+`medication_http_responses_total` is labelled by `method`, `route` (the route pattern,
+not the raw path), and `status`. Requests that match no route collapse into
+`method="other",route="unmatched"` to bound label cardinality.
 
 The API uses `/v1` versioning. Collection endpoints use `limit` and `offset` pagination. The server performs graceful shutdown and keeps its security timeouts as internal defaults.
