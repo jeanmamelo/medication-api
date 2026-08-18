@@ -62,15 +62,15 @@ func (repository *Repository) List(ctx context.Context, limit, offset int) ([]me
 	return items, rows.Err()
 }
 
-func (repository *Repository) Update(ctx context.Context, item medication.Medication) error {
-	command, err := repository.pool.Exec(ctx, `UPDATE medications SET name = $2, dosage = $3, form = $4, updated_at = NOW() WHERE id = $1`, item.ID, item.Name, item.Dosage, item.Form)
-	if err != nil {
-		return err
+// Update merges the supplied fields in a single statement. A nil pointer binds as SQL
+// NULL, so COALESCE keeps the stored value and concurrent partial updates cannot
+// overwrite each other's fields.
+func (repository *Repository) Update(ctx context.Context, id string, input medication.UpdateInput) (medication.Medication, error) {
+	item, err := scanMedication(repository.pool.QueryRow(ctx, `UPDATE medications SET name = COALESCE($2, name), dosage = COALESCE($3, dosage), form = COALESCE($4, form), updated_at = NOW() WHERE id = $1 RETURNING id, name, dosage, form`, id, input.Name, input.Dosage, input.Form))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return medication.Medication{}, medication.ErrNotFound
 	}
-	if command.RowsAffected() == 0 {
-		return medication.ErrNotFound
-	}
-	return nil
+	return item, err
 }
 
 func (repository *Repository) Delete(ctx context.Context, id string) error {

@@ -25,6 +25,12 @@ Base path: `/v1`
 | `PATCH` | `/v1/medications/{id}` | Partially update one medication. | `200 OK` |
 | `DELETE` | `/v1/medications/{id}` | Delete one medication. | `204 No Content` |
 
+`PATCH` accepts any subset of `name`, `dosage`, and `form`; at least one is required.
+Omitted fields are left untouched. The merge is performed server-side in a single
+statement, so concurrent partial updates of different fields cannot overwrite each other.
+
+`GET /v1/medications` accepts `limit` (1–100, default 20) and a non-negative `offset`.
+
 ## Error shape
 
 ```json
