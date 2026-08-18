@@ -2,6 +2,11 @@
 
 REST API for medication records, built with Go and PostgreSQL.
 
+## Live deployment
+
+A live instance is deployed on Render. Interactive API docs:
+[medication-api-1j1b.onrender.com/docs](https://medication-api-1j1b.onrender.com/docs/)
+
 ## Requirements
 
 - Go 1.26+
